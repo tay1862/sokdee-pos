@@ -1,0 +1,108 @@
+name: Build & Deploy SOKDEE POS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/sokdee-pos-api
+
+jobs:
+  # ─── Test Go backend ─────────────────────────────────────────────────────────
+  test-backend:
+    name: Test Backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: backend/go.sum
+
+      - name: Run tests
+        working-directory: backend
+        run: go test ./... -race -timeout 60s
+
+  # ─── Build & push Docker image ───────────────────────────────────────────────
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: test-backend
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Deploy to VPS ───────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            # Pull latest compose file
+            cd /opt/sokdee-pos
+            git pull origin main
+
+            # Login to registry
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull new image and restart
+            IMAGE_TAG=${{ needs.build-push.outputs.image_tag }} \
+              docker compose pull api
+
+            IMAGE_TAG=${{ needs.build-push.outputs.image_tag }} \
+              docker compose up -d --no-deps api
+
+            # Cleanup old images
+            docker image prune -f
+
+            echo "Deployed successfully"
+            docker compose ps
