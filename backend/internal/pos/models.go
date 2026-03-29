@@ -33,6 +33,7 @@ type Order struct {
 	TaxAmount      float64     `json:"tax_amount"`
 	Total          float64     `json:"total"`
 	Notes          *string     `json:"notes"`
+	IdempotencyKey *string     `json:"idempotency_key,omitempty"`
 	Items          []OrderItem `json:"items"`
 	CreatedAt      time.Time   `json:"created_at"`
 	PaidAt         *time.Time  `json:"paid_at"`

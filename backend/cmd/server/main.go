@@ -13,8 +13,11 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/sokdee/pos-backend/internal/auth"
 	"github.com/sokdee/pos-backend/internal/database"
+	"github.com/sokdee/pos-backend/internal/inventory"
 	"github.com/sokdee/pos-backend/internal/kds"
 	appMiddleware "github.com/sokdee/pos-backend/internal/middleware"
+	"github.com/sokdee/pos-backend/internal/pos"
+	"github.com/sokdee/pos-backend/internal/tenant"
 )
 
 func main() {
@@ -34,9 +37,29 @@ func main() {
 
 	// ── Repositories ──────────────────────────────────────────────────────────
 	authRepo := auth.NewPgRepository(db)
+	tenantPlanRepo := tenant.NewPgPlanRepository(db)
+	tenantRepo := tenant.NewPgTenantRepository(db)
+	userRepo := tenant.NewPgUserRepository(db)
+	inventoryRepo := inventory.NewPgRepository(db)
+	posRepo := pos.NewPgRepository(db)
+	shiftRepo := pos.NewPgShiftRepository(db)
+	exchangeRateRepo := pos.NewPgExchangeRateRepository(db)
 
 	// ── Handlers ──────────────────────────────────────────────────────────────
 	authHandler := auth.NewHandler(authRepo)
+	planHandler := tenant.NewPlanHandler(tenantPlanRepo)
+	tenantHandler := tenant.NewTenantHandler(tenantRepo)
+	userHandler := tenant.NewUserHandler(userRepo)
+	inventoryHandler := inventory.NewHandler(inventoryRepo, func(tenantID string) (*int, error) {
+		plan, err := userRepo.GetTenantPlan(context.Background(), tenantID)
+		if err != nil || plan == nil {
+			return nil, err
+		}
+		return plan.MaxProducts, nil
+	})
+	posHandler := pos.NewHandler(posRepo)
+	shiftHandler := pos.NewShiftHandler(shiftRepo)
+	exchangeRateHandler := pos.NewExchangeRateHandler(exchangeRateRepo)
 
 	// ── KDS Hub ───────────────────────────────────────────────────────────────
 	kdsHub := kds.NewHub()
@@ -92,32 +115,33 @@ func main() {
 			r.Delete("/auth/device/{deviceId}", authHandler.RevokeDevice)
 
 			// Users
-			r.Get("/users", notImplemented)
-			r.Post("/users", notImplemented)
-			r.Patch("/users/{id}", notImplemented)
-			r.Delete("/users/{id}", notImplemented)
-			r.Patch("/users/{id}/pin", notImplemented)
+			r.Get("/users", userHandler.ListUsers)
+			r.Post("/users", userHandler.CreateUser)
+			r.Patch("/users/{id}", userHandler.UpdateUser)
+			r.Delete("/users/{id}", userHandler.DeactivateUser)
+			r.Patch("/users/{id}/pin", userHandler.ChangePIN)
 
 			// Products & Inventory
-			r.Get("/products", notImplemented)
-			r.Post("/products", notImplemented)
-			r.Patch("/products/{id}", notImplemented)
-			r.Delete("/products/{id}", notImplemented)
-			r.Post("/products/import", notImplemented)
-			r.Get("/categories", notImplemented)
-			r.Post("/categories", notImplemented)
-			r.Post("/stock/in", notImplemented)
-			r.Post("/stock/adjust", notImplemented)
-			r.Get("/stock/transactions", notImplemented)
+			r.Get("/products", inventoryHandler.ListProducts)
+			r.Post("/products", inventoryHandler.CreateProduct)
+			r.Get("/products/{id}", inventoryHandler.GetProduct)
+			r.Patch("/products/{id}", inventoryHandler.UpdateProduct)
+			r.Delete("/products/{id}", inventoryHandler.DeleteProduct)
+			r.Post("/products/import", inventoryHandler.ImportCSV)
+			r.Get("/categories", inventoryHandler.ListCategories)
+			r.Post("/categories", inventoryHandler.CreateCategory)
+			r.Post("/stock/in", inventoryHandler.StockIn)
+			r.Post("/stock/adjust", inventoryHandler.StockAdjust)
+			r.Get("/stock/transactions", inventoryHandler.ListStockTransactions)
 
 			// Orders & POS
-			r.Get("/orders", notImplemented)
-			r.Post("/orders", notImplemented)
-			r.Get("/orders/{id}", notImplemented)
+			r.Get("/orders", posHandler.ListOrders)
+			r.Post("/orders", posHandler.CreateOrder)
+			r.Get("/orders/{id}", posHandler.GetOrder)
 			r.Patch("/orders/{id}", notImplemented)
-			r.Post("/orders/{id}/pay", notImplemented)
-			r.Post("/orders/{id}/void", notImplemented)
-			r.Post("/orders/{id}/refund", notImplemented)
+			r.Post("/orders/{id}/pay", posHandler.ProcessPayment)
+			r.Post("/orders/{id}/void", posHandler.VoidOrder)
+			r.Post("/orders/{id}/refund", posHandler.RefundOrder)
 
 			// Tables
 			r.Get("/tables", notImplemented)
@@ -127,10 +151,10 @@ func main() {
 			r.Post("/tables/{id}/move", notImplemented)
 
 			// Shifts
-			r.Get("/shifts", notImplemented)
-			r.Post("/shifts/open", notImplemented)
-			r.Post("/shifts/{id}/close", notImplemented)
-			r.Get("/shifts/{id}/summary", notImplemented)
+			r.Get("/shifts", shiftHandler.ListShifts)
+			r.Post("/shifts/open", shiftHandler.OpenShift)
+			r.Post("/shifts/{id}/close", shiftHandler.CloseShift)
+			r.Get("/shifts/{id}/summary", shiftHandler.GetShiftSummary)
 
 			// Discounts
 			r.Get("/discounts", notImplemented)
@@ -151,11 +175,11 @@ func main() {
 			r.Get("/sync/conflicts", notImplemented)
 			r.Post("/sync/conflicts/{id}/resolve", notImplemented)
 
-			// Settings
+			// Settings & Exchange Rates
 			r.Get("/settings", notImplemented)
 			r.Patch("/settings", notImplemented)
-			r.Get("/settings/exchange-rates", notImplemented)
-			r.Post("/settings/exchange-rates", notImplemented)
+			r.Get("/settings/exchange-rates", exchangeRateHandler.GetRates)
+			r.Post("/settings/exchange-rates", exchangeRateHandler.SetRate)
 
 			// Notifications
 			r.Get("/notifications", notImplemented)
@@ -164,15 +188,15 @@ func main() {
 			// Super Admin routes
 			r.Group(func(r chi.Router) {
 				r.Use(appMiddleware.RequireSuperAdmin)
-				r.Get("/admin/tenants", notImplemented)
-				r.Post("/admin/tenants", notImplemented)
-				r.Get("/admin/tenants/{id}", notImplemented)
-				r.Patch("/admin/tenants/{id}", notImplemented)
-				r.Patch("/admin/tenants/{id}/suspend", notImplemented)
-				r.Patch("/admin/tenants/{id}/activate", notImplemented)
-				r.Get("/admin/plans", notImplemented)
-				r.Post("/admin/plans", notImplemented)
-				r.Patch("/admin/plans/{id}", notImplemented)
+				r.Get("/admin/tenants", tenantHandler.ListTenants)
+				r.Post("/admin/tenants", tenantHandler.CreateTenant)
+				r.Get("/admin/tenants/{id}", tenantHandler.GetTenant)
+				r.Patch("/admin/tenants/{id}", tenantHandler.UpdateTenant)
+				r.Patch("/admin/tenants/{id}/suspend", tenantHandler.SuspendTenant)
+				r.Patch("/admin/tenants/{id}/activate", tenantHandler.ActivateTenant)
+				r.Get("/admin/plans", planHandler.ListPlans)
+				r.Post("/admin/plans", planHandler.CreatePlan)
+				r.Patch("/admin/plans/{id}", planHandler.UpdatePlan)
 			})
 		})
 	})
