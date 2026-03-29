@@ -1,0 +1,28 @@
+# Environment
+.env
+*.env.local
+
+# Go
+backend/bin/
+backend/*.exe
+
+# Flutter
+sokdee_pos/.dart_tool/
+sokdee_pos/build/
+sokdee_pos/.flutter-plugins
+sokdee_pos/.flutter-plugins-dependencies
+sokdee_pos/*.g.dart
+sokdee_pos/**/*.g.dart
+sokdee_pos/**/*.freezed.dart
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+nginx/ssl/

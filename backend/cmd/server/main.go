@@ -10,7 +10,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/sokdee/pos-backend/internal/auth"
+	"github.com/sokdee/pos-backend/internal/database"
+	"github.com/sokdee/pos-backend/internal/kds"
+	appMiddleware "github.com/sokdee/pos-backend/internal/middleware"
 )
 
 func main() {
@@ -19,134 +23,161 @@ func main() {
 		port = "8080"
 	}
 
+	// ── Database ──────────────────────────────────────────────────────────────
+	ctx := context.Background()
+	db, err := database.Connect(ctx)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer db.Close()
+	log.Println("Database connected")
+
+	// ── Repositories ──────────────────────────────────────────────────────────
+	authRepo := auth.NewPgRepository(db)
+
+	// ── Handlers ──────────────────────────────────────────────────────────────
+	authHandler := auth.NewHandler(authRepo)
+
+	// ── KDS Hub ───────────────────────────────────────────────────────────────
+	kdsHub := kds.NewHub()
+	kdsHandler := kds.NewHandler(kdsHub)
+
+	// ── Router ────────────────────────────────────────────────────────────────
 	r := chi.NewRouter()
 
-	// Global middleware
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(chimw.RequestID)
+	r.Use(chimw.RealIP)
+	r.Use(chimw.Logger)
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.Timeout(60 * time.Second))
 
-	// Health check
+	// CORS for Flutter Web
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// ── Health ────────────────────────────────────────────────────────────────
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","service":"sokdee-pos"}`))
 	})
 
-	// API v1 routes
+	// ── WebSocket KDS ─────────────────────────────────────────────────────────
+	r.Get("/ws/kds", kdsHandler.ServeWS)
+
+	// ── API v1 ────────────────────────────────────────────────────────────────
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"message":"pong","service":"sokdee-pos"}`))
-		})
 
-		// ── Auth (public) ──────────────────────────────────────────────────
-		r.Post("/auth/login", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotImplemented)
-		})
-		r.Post("/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotImplemented)
-		})
-		r.Post("/auth/logout", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotImplemented)
-		})
+		// Public auth routes
+		r.Post("/auth/login", authHandler.Login)
+		r.Post("/auth/refresh", authHandler.Refresh)
+		r.Post("/auth/logout", authHandler.Logout)
 
-		// ── Authenticated routes ───────────────────────────────────────────
+		// Authenticated routes
 		r.Group(func(r chi.Router) {
-			// All routes below require a valid JWT
-			// r.Use(middleware.Authenticate)  // wired at startup with real handler
+			r.Use(appMiddleware.Authenticate)
+			r.Use(appMiddleware.TenantIsolation(db))
 
-			// Super Admin
-			r.Route("/admin", func(r chi.Router) {
-				r.Get("/tenants", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/tenants", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Get("/plans", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/plans", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
+			// Device management
+			r.Post("/auth/device/register", authHandler.RegisterDevice)
+			r.Delete("/auth/device/{deviceId}", authHandler.RevokeDevice)
 
 			// Users
-			r.Route("/users", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
+			r.Get("/users", notImplemented)
+			r.Post("/users", notImplemented)
+			r.Patch("/users/{id}", notImplemented)
+			r.Delete("/users/{id}", notImplemented)
+			r.Patch("/users/{id}/pin", notImplemented)
 
 			// Products & Inventory
-			r.Route("/products", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/import", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
-			r.Route("/categories", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
-			r.Post("/stock/in", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Post("/stock/adjust", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/stock/transactions", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
+			r.Get("/products", notImplemented)
+			r.Post("/products", notImplemented)
+			r.Patch("/products/{id}", notImplemented)
+			r.Delete("/products/{id}", notImplemented)
+			r.Post("/products/import", notImplemented)
+			r.Get("/categories", notImplemented)
+			r.Post("/categories", notImplemented)
+			r.Post("/stock/in", notImplemented)
+			r.Post("/stock/adjust", notImplemented)
+			r.Get("/stock/transactions", notImplemented)
 
 			// Orders & POS
-			r.Route("/orders", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Get("/{id}", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/{id}/pay", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/{id}/void", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/{id}/refund", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
+			r.Get("/orders", notImplemented)
+			r.Post("/orders", notImplemented)
+			r.Get("/orders/{id}", notImplemented)
+			r.Patch("/orders/{id}", notImplemented)
+			r.Post("/orders/{id}/pay", notImplemented)
+			r.Post("/orders/{id}/void", notImplemented)
+			r.Post("/orders/{id}/refund", notImplemented)
 
-			// Tables (restaurant)
-			r.Route("/tables", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/merge", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
+			// Tables
+			r.Get("/tables", notImplemented)
+			r.Post("/tables", notImplemented)
+			r.Patch("/tables/{id}", notImplemented)
+			r.Post("/tables/merge", notImplemented)
+			r.Post("/tables/{id}/move", notImplemented)
 
 			// Shifts
-			r.Route("/shifts", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/open", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/{id}/close", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Get("/{id}/summary", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
+			r.Get("/shifts", notImplemented)
+			r.Post("/shifts/open", notImplemented)
+			r.Post("/shifts/{id}/close", notImplemented)
+			r.Get("/shifts/{id}/summary", notImplemented)
 
 			// Discounts
-			r.Route("/discounts", func(r chi.Router) {
-				r.Get("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-				r.Post("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			})
+			r.Get("/discounts", notImplemented)
+			r.Post("/discounts", notImplemented)
+			r.Patch("/discounts/{id}", notImplemented)
 
 			// Reports
-			r.Get("/reports/sales/daily", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/reports/sales/monthly", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/reports/pnl", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/reports/stock", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/reports/cashier", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/reports/export", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
+			r.Get("/reports/sales/daily", notImplemented)
+			r.Get("/reports/sales/monthly", notImplemented)
+			r.Get("/reports/pnl", notImplemented)
+			r.Get("/reports/stock", notImplemented)
+			r.Get("/reports/cashier", notImplemented)
+			r.Get("/reports/export", notImplemented)
 
 			// Sync
-			r.Post("/sync/push", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/sync/pull", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/sync/conflicts", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Post("/sync/conflicts/{id}/resolve", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
+			r.Post("/sync/push", notImplemented)
+			r.Get("/sync/pull", notImplemented)
+			r.Get("/sync/conflicts", notImplemented)
+			r.Post("/sync/conflicts/{id}/resolve", notImplemented)
 
-			// Settings & Exchange Rates
-			r.Get("/settings", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Patch("/settings", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Get("/settings/exchange-rates", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
-			r.Post("/settings/exchange-rates", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
+			// Settings
+			r.Get("/settings", notImplemented)
+			r.Patch("/settings", notImplemented)
+			r.Get("/settings/exchange-rates", notImplemented)
+			r.Post("/settings/exchange-rates", notImplemented)
 
 			// Notifications
-			r.Get("/notifications", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotImplemented) })
+			r.Get("/notifications", notImplemented)
+			r.Patch("/notifications/{id}/read", notImplemented)
+
+			// Super Admin routes
+			r.Group(func(r chi.Router) {
+				r.Use(appMiddleware.RequireSuperAdmin)
+				r.Get("/admin/tenants", notImplemented)
+				r.Post("/admin/tenants", notImplemented)
+				r.Get("/admin/tenants/{id}", notImplemented)
+				r.Patch("/admin/tenants/{id}", notImplemented)
+				r.Patch("/admin/tenants/{id}/suspend", notImplemented)
+				r.Patch("/admin/tenants/{id}/activate", notImplemented)
+				r.Get("/admin/plans", notImplemented)
+				r.Post("/admin/plans", notImplemented)
+				r.Patch("/admin/plans/{id}", notImplemented)
+			})
 		})
 	})
 
-	// KDS WebSocket endpoint
-	r.Get("/ws/kds", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotImplemented)
-	})
-
+	// ── Server ────────────────────────────────────────────────────────────────
 	srv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      r,
@@ -155,26 +186,26 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("SOKDEE POS backend starting on port %s", port)
+		log.Printf("SOKDEE POS backend starting on :%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+			log.Fatalf("listen: %s", err)
 		}
 	}()
 
 	<-done
-	log.Println("Server shutting down...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	log.Println("Shutting down...")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	_ = srv.Shutdown(shutCtx)
+	log.Println("Server stopped")
+}
 
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
-	}
-
-	log.Println("Server exited")
+func notImplemented(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	_, _ = w.Write([]byte(`{"error":{"code":"not_implemented","message":"endpoint coming soon"}}`))
 }
